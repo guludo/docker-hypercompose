@@ -1,0 +1,241 @@
+#!/bin/bash
+
+# Usage: msg MSG
+#
+# Display message to stderr.
+msg() {
+    echo "hypercompose: $1" >&2
+}
+
+# Usage: error MSG
+#
+# Display error message and exit.
+error() {
+    local msg_prefix="hypercompose: error:"
+    if [[ -n "$SUBCOMMAND" ]]; then
+        local msg_prefix="hypercompose: $SUBCOMMAND: error:"
+    fi
+    echo "$msg_prefix $1" >&2
+    exit 1
+}
+
+# Usage: comp-jq ARGS...
+#
+# Run a jq filter for a component configuration.
+comp-jq() {
+    local comp="$1"
+    shift
+    echo "${COMP_JSON[$comp]}" | jq -r "$@"
+}
+
+# Usage: gen-comp-compose COMPONENT
+#
+# Generate the docker-compose.yml (and docker-compose.override.yml, if
+# necessary) file for a component by running docker-compose config.
+gen-comp-compose() {
+    local comp="$1"
+    local original_config=$(mktemp -p $TMPDIR)
+    (cd "${COMP_SRCDIR[$comp]}" && docker-compose config) > "$original_config"
+
+    local override=$(comp-jq "$comp" '
+        if has("override") then
+            .override + {version: "'$(yq -r '.version' "$original_config")'"}
+        else
+            ""
+        end
+    ')
+
+    if [[ -n "$override" ]]; then
+        local override_config=$(mktemp -p $TMPDIR)
+        echo "$override" > "$override_config"
+        docker-compose --project-directory "${COMP_SRCDIR[$comp]}" \
+                       --project-name "$(basename "${COMP_RUNDIR[$comp]}")" \
+                       -f "$original_config" \
+                       -f "$override_config" config \
+                       > "${COMP_RUNDIR[$comp]}/docker-compose.yml"
+    else
+        cp "$original_config" "${COMP_RUNDIR[$comp]}/docker-compose.yml"
+    fi
+}
+
+# Usage: compose-cmd COMPONENT ARGS...
+#
+# Run docker-compose for a component.
+compose-cmd() {
+    local comp=$1
+    shift
+    (cd "${COMP_RUNDIR[$comp]}" && docker-compose "$@")
+}
+
+# This is the function called for the EXIT trap. This function's main
+# responsibility is doing the necessary cleanup.
+on-exit() {
+    if [[ -n "$TMPDIR" ]]; then
+        rm -rf $TMPDIR
+    fi
+}
+
+parse-hypercompose() {
+    if ! [[ -f "$HYPERCOMPOSE_FILE" ]]; then
+        error "file not found: $HYPERCOMPOSE_FILE"
+    fi
+
+    OLDIFS=$IFS
+    IFS="
+    "
+    for comp in $(yq -r '(.components // {}) | keys | .[]' $HYPERCOMPOSE_FILE); do
+        COMPONENTS[${#COMPONENTS[@]}]="$comp"
+        COMP_JSON[$comp]=$(yq '.components["'"$comp"'"]' $HYPERCOMPOSE_FILE)
+
+        COMP_SRCDIR[$comp]=$(comp-jq "$comp" '.url // ""')
+        if [[ -z "${COMP_SRCDIR[$comp]}" ]]; then
+            COMP_SRCDIR[$comp]="$comp"
+        fi
+    done
+    IFS=$OLDIFS
+}
+
+parse-confdir() {
+    PREFIX=$(<"$CONFDIR/PREFIX")
+
+    local l i
+    readarray -t l <"$CONFDIR/COMP_RUNDIR"
+    for ((i = 0; i < ${#l[@]}; i += 2)); do
+        COMP_RUNDIR[${l[$i]}]=${l[$((i + 1))]}
+    done
+}
+
+config-subcommand() {
+    set -e
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -f | --file)
+                shift
+                HYPERCOMPOSE_FILE=$1
+                if [[ -z $HYPERCOMPOSE_FILE ]]; then
+                    error "option -f/--file: missing argument"
+                fi
+                ;;
+            -p | --prefix)
+                shift
+                PREFIX=$1
+                if [[ -z $PREFIX ]]; then
+                    error "option -p/--prefix: missing argument"
+                fi
+                ;;
+            *)
+                error "unexpected option/arg \"$1\""
+                ;;
+        esac
+        shift
+    done
+
+    HYPERCOMPOSE_FILE=${HYPERCOMPOSE_FILE:-docker-hypercompose.yml}
+    PREFIX=${PREFIX:-$(basename $(dirname $(realpath -s $HYPERCOMPOSE_FILE)))}
+
+    parse-hypercompose
+
+    rm -rf $CONFDIR
+    mkdir -p $CONFDIR
+
+    cp "$HYPERCOMPOSE_FILE" "$CONFDIR/docker-hypercompose.yml"
+    echo $PREFIX > "$CONFDIR/PREFIX"
+
+    for comp in "${COMPONENTS[@]}"; do
+        msg "configuring $comp"
+
+        COMP_RUNDIR[$comp]="$CONFDIR/$PREFIX-$(basename ${COMP_SRCDIR[$comp]})"
+        if [[ -e "${COMP_RUNDIR[$comp]}" ]]; then
+            COMP_RUNDIR[$comp]=$(mktemp \
+                -d -p "$CONFDIR" "$PREFIX-$(basename ${COMP_SRCDIR[$comp]})"-XXX)
+        else
+            mkdir "${COMP_RUNDIR[$comp]}"
+        fi
+
+        echo "$comp" >> "$CONFDIR/COMP_RUNDIR"
+        echo "${COMP_RUNDIR[$comp]}" >> "$CONFDIR/COMP_RUNDIR"
+
+        gen-comp-compose "$comp"
+    done
+
+    set +e
+}
+
+up-subcommand() {
+    for comp in "${COMPONENTS[@]}"; do
+        msg "Starting $comp"
+        compose-cmd $comp up -d
+    done
+}
+
+logs-subcommand() {
+    for comp in "${COMPONENTS[@]}"; do
+        compose-cmd $comp logs -f &
+    done
+}
+
+down-subcommand() {
+    for comp in "${COMPONENTS[@]}"; do
+        msg "Shutting $comp down"
+        compose-cmd $comp down
+    done
+}
+
+
+# Register traps.
+trap on-exit EXIT
+
+# Abort if anything goes wrong from this point on.
+set -e
+
+SUBCOMMAND=""
+
+# Parse options
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        config | up | down | logs)
+            SUBCOMMAND=$1
+            shift
+            break
+            ;;
+        *)
+            error "unexpected option/arg \"$1\""
+            ;;
+    esac
+    shift
+done
+
+if [[ -z "$SUBCOMMAND" ]]; then
+    error "missing subcommand"
+fi
+
+# Directory to store temporary files.
+TMPDIR=$(mktemp -d)
+
+# Directory to store generated files for components.
+CONFDIR=.hypercompose
+
+declare -a COMPONENTS
+declare -A COMP_JSON
+declare -A COMP_SRCDIR
+declare -A COMP_RUNDIR
+
+if [[ "$SUBCOMMAND" != "config" ]]; then
+    if ! [[ -e "$CONFDIR" ]]; then
+        error "missing configuration directory, run docker-hypercompose config"
+    fi
+
+    HYPERCOMPOSE_FILE="$CONFDIR/docker-hypercompose.yml"
+    parse-hypercompose
+    parse-confdir
+fi
+
+set +e
+
+$SUBCOMMAND-subcommand "$@"
+
+# Wait while there are pending jobs
+while jobs %% &>/dev/null; do
+    wait
+done
