@@ -1,5 +1,7 @@
 #!/bin/bash
 
+declare -A SUBCOMMANDS_SHORT_DESC=()
+
 # Usage: msg MSG
 #
 # Display message to stderr.
@@ -124,6 +126,36 @@ parse-confdir() {
     done
 }
 
+SUBCOMMANDS_SHORT_DESC[help]="Display help message."
+SUBCOMMANDS_SHORT_DESC["--help"]="Alias for the \"help\" subcommand."
+help-subcommand() {
+    cat <<EOF
+Usage: ${BASH_ARGV0##*/} [OPTIONS] SUBCOMMAND [ARGS]
+
+Run SUBCOMMAND with ARGS.
+
+Options:
+    -c, --component COMPONENT
+        Select this COMPONENT for the SUBCOMMAND. By default, subcommands are
+        executed for every component. If this option is passed, then SUBCOMMAND 
+        will be executed for selected components only. This option can be
+        passed multiple times in order to select multiple components.
+
+Subcommands:
+EOF
+    declare max_len=0
+    declare subcommands=$(echo ${!SUBCOMMANDS_SHORT_DESC[@]} | tr " " "\n" | sort)
+    for subcommand in $subcommands; do
+        max_len=$((${#subcommand} > max_len ? ${#subcommand} : max_len))
+    done
+    for subcommand in $subcommands; do
+        printf "    %-${max_len}s	%s\n" \
+            "${subcommand}" \
+            "${SUBCOMMANDS_SHORT_DESC[$subcommand]}"
+    done
+}
+
+SUBCOMMANDS_SHORT_DESC[config]="Configure the components."
 config-subcommand() {
     set -e
 
@@ -187,6 +219,7 @@ config-subcommand() {
     set +e
 }
 
+SUBCOMMANDS_SHORT_DESC[up]="Start the components."
 up-subcommand() {
     for comp in "${COMPONENTS[@]}"; do
         msg "Starting $comp"
@@ -194,12 +227,14 @@ up-subcommand() {
     done
 }
 
+SUBCOMMANDS_SHORT_DESC[logs]="Run docker-compose logs for each component."
 logs-subcommand() {
     for comp in "${COMPONENTS[@]}"; do
         compose-cmd $comp logs -f &
     done
 }
 
+SUBCOMMANDS_SHORT_DESC[down]="Stop the components."
 down-subcommand() {
     for comp in "${COMPONENTS[@]}"; do
         msg "Shutting $comp down"
@@ -207,6 +242,8 @@ down-subcommand() {
     done
 }
 
+SUBCOMMANDS_SHORT_DESC[compose]="Run a docker-compose command for each component."
+SUBCOMMANDS_SHORT_DESC["--"]="Alias for the \"compose\" subcommand."
 compose-subcommand() {
     for comp in "${COMPONENTS[@]}"; do
         compose-cmd $comp "$@"
@@ -237,6 +274,11 @@ while [[ $# -gt 0 ]]; do
             SUBCOMMAND=compose
             shift
             break
+            ;;
+        --help | help)
+            shift
+            help-subcommand "$@"
+            exit 0
             ;;
         config | up | down | logs | compose)
             SUBCOMMAND=$1
