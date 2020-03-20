@@ -1,8 +1,8 @@
 ####################
-docker-hyper-compose
+docker-hypercompose
 ####################
 
-``docker-hyper-compose`` is a bash script that wraps ``docker-compose`` in
+``docker-hypercompose`` is a bash script that wraps ``docker-compose`` in
 order to allow running multiple ``docker-compose`` projects.
 
 **Dependencies:**
