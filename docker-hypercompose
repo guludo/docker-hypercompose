@@ -95,10 +95,29 @@ parse-hypercompose() {
     IFS=$OLDIFS
 }
 
+filter-components() {
+    declare -A selected_set
+    for comp in "$@"; do
+        selected_set[$comp]=1
+    done
+
+    local components_copy=("${COMPONENTS[@]}")
+    COMPONENTS=()
+    for comp in "${components_copy[@]}"; do
+        if [[ -n "${selected_set[$comp]}" ]]; then
+            COMPONENTS+=("$comp")
+        fi
+    done
+}
+
 parse-confdir() {
     PREFIX=$(<"$CONFDIR/PREFIX")
 
     local l i
+
+    readarray -t l <"$CONFDIR/SELECTED_COMPONENTS"
+    filter-components "${l[@]}"
+
     readarray -t l <"$CONFDIR/COMP_RUNDIR"
     for ((i = 0; i < ${#l[@]}; i += 2)); do
         COMP_RUNDIR[${l[$i]}]=${l[$((i + 1))]}
@@ -136,6 +155,10 @@ config-subcommand() {
 
     parse-hypercompose
 
+    if [[ ${#SELECTED_COMPONENTS[@]} -gt 0 ]]; then
+        filter-components "${SELECTED_COMPONENTS[@]}"
+    fi
+
     rm -rf $CONFDIR
     mkdir -p $CONFDIR
 
@@ -143,6 +166,8 @@ config-subcommand() {
     echo $PREFIX > "$CONFDIR/PREFIX"
 
     for comp in "${COMPONENTS[@]}"; do
+        echo "$comp" >> "$CONFDIR/SELECTED_COMPONENTS"
+
         msg "configuring $comp"
 
         COMP_RUNDIR[$comp]="$CONFDIR/$PREFIX-$(basename ${COMP_SRCDIR[$comp]})"
@@ -196,9 +221,18 @@ set -e
 
 SUBCOMMAND=""
 
+declare -a SELECTED_COMPONENTS
+
 # Parse options
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --component | -c)
+            shift
+            if [[ -z "$1" ]]; then
+                error "--component: missing component name"
+            fi
+            SELECTED_COMPONENTS+=("$1")
+            ;;
         --)
             SUBCOMMAND=compose
             shift
@@ -239,6 +273,9 @@ if [[ "$SUBCOMMAND" != "config" ]]; then
     HYPERCOMPOSE_FILE="$CONFDIR/docker-hypercompose.yml"
     parse-hypercompose
     parse-confdir
+    if [[ ${#SELECTED_COMPONENTS[@]} -gt 0 ]]; then
+        filter-components "${SELECTED_COMPONENTS[@]}"
+    fi
 fi
 
 set +e
